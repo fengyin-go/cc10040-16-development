@@ -9,7 +9,7 @@ import time
 import threading
 from typing import Any
 
-from app.seed import SEED_ROWS
+from app.seed import REPORT_DEFAULT_GRANTS, REPORT_SAMPLE_ROWS, SEED_ROWS
 
 
 class Store:
@@ -17,6 +17,25 @@ class Store:
         self._tables: dict[str, list[dict[str, Any]]] = {
             name: [dict(row) for row in rows] for name, rows in SEED_ROWS.items()
         }
+        # 报告样本明细：报告渲染与受控切片唯一的行级来源，不直接对外暴露。
+        self._report_samples: list[dict[str, Any]] = [
+            dict(row) for row in REPORT_SAMPLE_ROWS
+        ]
+        # 报告共享授权：report_id -> 接收团队 -> 授权范围
+        self._report_access: dict[str, dict[str, dict[str, Any]]] = {}
+        for grant in REPORT_DEFAULT_GRANTS:
+            report_grants = self.report_grants(int(grant["报告ID"]))
+            report_grants[str(grant["接收团队"])] = {
+                "report_id": int(grant["报告ID"]),
+                "reader": grant["接收团队"],
+                "scope": grant["scope"],
+                "granted_at": grant["granted_at"],
+            }
+        # 被撤销的授权留档：共享页仍能看到「已撤销」的接收团队并验证其取数会被拒。
+        self._report_access_history: dict[str, dict[str, dict[str, Any]]] = {}
+        self._metric_slices: dict[str, dict[str, Any]] = {}
+        # 交付记录：每次交付保存交付时的统计与新鲜度判定
+        self._deliveries: list[dict[str, Any]] = []
         self._id_counters: dict[str, int] = {}
         # Cache layer storage
         self._cache: dict[str, tuple[float, Any]] = {}
@@ -175,6 +194,62 @@ class Store:
 
     def recalc_history(self) -> list[dict[str, Any]]:
         return self._recalc_history
+
+    # ── Report sharing / controlled slices ──
+
+    def report_samples(self) -> list[dict[str, Any]]:
+        return self._report_samples
+
+    def report_sample_fields(self) -> list[str]:
+        """样本明细的完整列，供切片裁剪列时对照。"""
+        fields: list[str] = []
+        for row in self._report_samples:
+            for key in row:
+                if key not in fields:
+                    fields.append(key)
+        return fields
+
+    def report_grants(self, report_id: int) -> dict[str, dict[str, Any]]:
+        return self._report_access.setdefault(str(report_id), {})
+
+    def grant_report_access(self, report_id: int, reader: str,
+                            scope: dict[str, Any]) -> dict[str, Any]:
+        grant = dict(scope)
+        grant["report_id"] = report_id
+        grant["reader"] = reader
+        grant["granted_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self.report_grants(report_id)[reader] = grant
+        return grant
+
+    def revoke_report_access(self, report_id: int, reader: str) -> dict[str, Any] | None:
+        revoked = self.report_grants(report_id).pop(reader, None)
+        if revoked is not None:
+            self._report_access_history.setdefault(str(report_id), {})[reader] = revoked
+        return revoked
+
+    def revoked_report_grants(self, report_id: int) -> dict[str, dict[str, Any]]:
+        return self._report_access_history.get(str(report_id), {})
+
+    def get_report_grant(self, report_id: int, reader: str) -> dict[str, Any] | None:
+        return self.report_grants(report_id).get(reader)
+
+    def save_metric_slice(self, metric_slice: dict[str, Any]) -> None:
+        self._metric_slices[str(metric_slice["slice_id"])] = metric_slice
+
+    def get_metric_slice(self, slice_id: str) -> dict[str, Any] | None:
+        return self._metric_slices.get(str(slice_id))
+
+    def record_delivery(self, delivery: dict[str, Any]) -> None:
+        self._deliveries.append(delivery)
+
+    def deliveries(self) -> list[dict[str, Any]]:
+        return self._deliveries
+
+    def get_delivery(self, delivery_id: str) -> dict[str, Any] | None:
+        for delivery in self._deliveries:
+            if delivery.get("delivery_id") == delivery_id:
+                return delivery
+        return None
 
     # ── Data artifacts for cross-module consumption ──
 

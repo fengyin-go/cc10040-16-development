@@ -12,6 +12,14 @@
         <button class="btn" data-testid="export" type="button" @click="exportRows">
           导出{{ meta.name }}清单
         </button>
+        <RouterLink
+          v-if="meta.key === 'report_template'"
+          class="btn"
+          data-testid="open-sharing"
+          to="/report_template/1/sharing"
+        >
+          报告共享分发
+        </RouterLink>
       </div>
     </header>
 
@@ -50,6 +58,14 @@
           <td v-for="column in meta.fields" :key="column">{{ row[column] ?? '—' }}</td>
           <td>{{ row.status }}</td>
           <td class="row-actions">
+            <RouterLink
+              v-if="meta.key === 'report_template' && row.status === '已发布'"
+              class="link"
+              :data-testid="`share-${row.id}`"
+              :to="`/report_template/${row.id}/sharing`"
+            >
+              共享
+            </RouterLink>
             <button
               v-for="action in meta.actions"
               :key="action"

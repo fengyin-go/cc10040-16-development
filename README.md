@@ -11,6 +11,7 @@
 .
 ├── frontend/                 Vue 3 + Vite + TypeScript 前端
 │   ├── src/views/WorkbenchView.vue|tsx  全部模块共享工作台
+│   ├── src/views/ReportShareView.vue    报告共享与交付复核
 │   ├── src/data/modules.ts              18个业务模块配置
 │   ├── src/api/              统一请求封装
 │   └── vite.config.ts        dev server 配置（open: false）
@@ -18,6 +19,7 @@
 │   ├── app/routers/resource.py  通用查询/导出/登记/动作接口
 │   ├── app/services/<key>.py    每个模块独立领域逻辑
 │   ├── app/services/base.py     共享服务骨架
+│   ├── app/services/report_sharing.py  报告共享授权与受控指标切片
 │   └── app/store.py          内存数据仓库与示例数据
 ├── .gitignore
 └── docker-compose.yml
@@ -45,6 +47,30 @@ npm run dev
 
 前端默认监听 `http://127.0.0.1:5195/`，dev server 不会自动打开浏览器，
 需要自己访问。`/api` 由 vite 代理到后端 `http://127.0.0.1:8015`。
+
+## 报告共享与受控切片
+
+报告模板支持按接收团队分发，同一份报告可以给不同权限的读者：
+
+- **区域汇总**（`region_summary`）：只看区域聚合值，门店编号/门店名称不出现在切片里；
+  分组小于最小成组规模（默认 2 家门店）时整组裁去，既不出行也不进入合计，避免用合计反推明细。
+- **门店明细**（`store_detail`）：可取得单店记录。
+
+流程：生成受控指标切片 → 数据服务按切片交付获准列与聚合结果 → 报告按读者身份计算样本统计
+→ 交付并留存凭证（报告编号、读者、获准列、统计口径、切片指纹）。
+
+```text
+POST /api/cross/report-template/{id}/prepare-slice?reader=大区汇总组
+POST /api/cross/data-service/{api_id}/deliver-slice?slice_id=...
+POST /api/cross/report-template/{id}/deliver?reader=...&slice_id=...
+GET  /api/cross/report-template/{id}/deliveries
+GET  /api/cross/deliveries/{delivery_id}/verify    # 开会前复核还能不能用
+POST /api/cross/report-template/{id}/revoke?reader=...
+```
+
+授权撤销后：重新取数返回 403，此前生成的切片无法再交付，凭证表的可用性一栏会标为「不可再用」。
+前端入口在报告模板列表的「共享」链接，或直接访问 `/report_template/1/sharing`。
+默认样例报告 1 已共享给「大区汇总组」和「门店运营组」。
 
 ## 业务模块
 
@@ -78,6 +104,14 @@ npm run dev
   `frontend/src/domain/<模块>.ts`，用于承载真实业务差异并维持36题位容量。
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
+
+## 测试
+
+```bash
+cd backend && .venv/bin/python -m pytest -q     # 领域行为测试
+cd frontend && npm run typecheck && npm run build
+cd frontend && npm run test:render               # 需先启动后端，走通取数/撤权/刷新复核
+```
 
 领域：数据工程
 子方向：数据分析与数据应用

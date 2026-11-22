@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from app.store import store
+from app.services import report_sharing as sharing
 from app.services.base import BaseModuleService
 
 
@@ -62,6 +64,62 @@ class DataServiceService(BaseModuleService):
             "request_method": api.get("请求方式"),
             "result_count": sum(len(r.get("rows", [])) for r in results),
             "query_results": results,
+        }
+
+    def deliver_slice(self, entry_id: int, slice_id: str) -> dict[str, Any]:
+        """按受控指标切片交付数据：只返回切片获准的列与聚合结果。
+
+        跨模块数据流: report_template -> report_sharing(受控切片) -> data_service
+        交付前重新校验切片固化的授权快照对应当前授权；授权撤销后不再交付任何样本。
+        """
+        api = store.find(self.MODULE, entry_id)
+        if api is None:
+            return {"error": f"服务接口 {entry_id} 不存在"}
+        if api["status"] != "已发布":
+            return {"error": f"服务接口 {entry_id} 未发布"}
+
+        metric_slice = store.get_metric_slice(slice_id)
+        if metric_slice is None:
+            raise sharing.SharingError("slice_missing", f"受控指标切片 {slice_id} 不存在", 404)
+
+        status = sharing.grant_status(
+            int(metric_slice["report_id"]),
+            metric_slice["reader"],
+            metric_slice.get("grant_snapshot"),
+        )
+        if not status["usable"]:
+            raise sharing.SharingError(
+                "access_revoked" if status["state"] == "revoked" else "slice_stale",
+                f"切片不可交付：{status['message']}", 403)
+
+        columns = list(metric_slice["allowed_columns"])
+        leaked = sorted(
+            set(metric_slice.get("suppressed_columns", []))
+            & set(metric_slice.get("aggregates", {}))
+        )
+        if leaked:
+            raise sharing.SharingError(
+                "scope_violation", "切片包含被裁去的明细列，拒绝交付", 500)
+
+        return {
+            "api": api.get("接口名称"),
+            "request_method": api.get("请求方式"),
+            "slice_id": metric_slice["slice_id"],
+            "slice_digest": metric_slice["slice_digest"],
+            "report_id": metric_slice["report_id"],
+            "report_name": metric_slice["report_name"],
+            "reader": metric_slice["reader"],
+            "scope": metric_slice["scope"],
+            "scope_label": metric_slice["scope_label"],
+            "columns": columns,
+            "rows": [
+                {column: row.get(column) for column in columns}
+                for row in metric_slice.get("rows", [])
+            ],
+            "aggregates": dict(metric_slice.get("aggregates", {})),
+            "aggregation": dict(metric_slice.get("aggregation", {})),
+            "sample_stats": dict(metric_slice.get("sample_stats", {})),
+            "delivered_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
     def get_service_health(self, entry_id: int) -> dict[str, Any]:

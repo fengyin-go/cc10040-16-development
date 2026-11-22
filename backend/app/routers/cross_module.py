@@ -6,8 +6,9 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
+from app.services import report_sharing as sharing
 from app.services.metric_definition import MetricDefinitionService
 from app.services.caliber_version import CaliberVersionService
 from app.services.query_builder import QueryBuilderService
@@ -65,6 +66,16 @@ def execute_query(template_id: int, operator: str = "系统"):
     """执行查询模板，返回结果与日志"""
     svc = QueryBuilderService()
     return svc.execute_query(template_id, operator=operator)
+
+
+@router.post("/data-service/{api_id}/deliver-slice")
+def deliver_data_service_slice(api_id: int, slice_id: str):
+    """数据服务按受控指标切片交付获准的列与聚合结果。"""
+    svc = DataServiceService()
+    try:
+        return svc.deliver_slice(api_id, slice_id)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
 
 
 @router.post("/data-service/{api_id}/call")
@@ -175,10 +186,82 @@ def share_pivot_to_report(config_id: int, report_template_id: int):
 
 
 @router.get("/report-template/{template_id}/generate")
-def generate_report(template_id: int):
-    """生成报告"""
+def generate_report(template_id: int, reader: str | None = None):
+    """生成报告；传 reader 时按该读者身份计算样本统计。"""
     svc = ReportTemplateService()
-    return svc.generate_report(template_id)
+    try:
+        return svc.generate_report(template_id, reader=reader)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@router.get("/report-template/{template_id}/shares")
+def list_report_shares(template_id: int):
+    """查看报告的共享授权和可选的接收范围。"""
+    svc = ReportTemplateService()
+    result = svc.list_shares(template_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"报告模板 {template_id} 不存在")
+    return result
+
+
+@router.post("/report-template/{template_id}/share")
+def share_report(template_id: int, reader: str, scope: str = "region_summary"):
+    """把报告共享给接收团队，指定其获准统计范围。"""
+    svc = ReportTemplateService()
+    try:
+        return svc.share_report(template_id, reader=reader, scope=scope)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@router.post("/report-template/{template_id}/revoke")
+def revoke_report_share(template_id: int, reader: str):
+    """撤销接收团队的授权；已交付结果随即标记不可用。"""
+    svc = ReportTemplateService()
+    try:
+        return svc.revoke_share(template_id, reader=reader)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@router.post("/report-template/{template_id}/prepare-slice")
+def prepare_report_slice(template_id: int, reader: str):
+    """为接收团队生成受控指标切片（只含获准列与聚合值）。"""
+    svc = ReportTemplateService()
+    try:
+        return svc.prepare_slice(template_id, reader=reader)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@router.post("/report-template/{template_id}/deliver")
+def deliver_report(template_id: int, reader: str, slice_id: str | None = None):
+    """交付报告结果给接收团队，并留存交付凭证。"""
+    svc = ReportTemplateService()
+    try:
+        return svc.deliver(template_id, reader=reader, slice_id=slice_id)
+    except sharing.SharingError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.to_dict()) from exc
+
+
+@router.get("/report-template/{template_id}/deliveries")
+def list_report_deliveries(template_id: int):
+    """列出报告的全部交付记录。"""
+    svc = ReportTemplateService()
+    if svc.get_entry(template_id) is None:
+        raise HTTPException(status_code=404, detail=f"报告模板 {template_id} 不存在")
+    return {"report_id": template_id, "deliveries": svc.list_deliveries(template_id)}
+
+
+@router.get("/deliveries/{delivery_id}/verify")
+def verify_delivery(delivery_id: str):
+    """开会前复核交付结果是否仍可用：授权是否被撤销、范围是否变化。"""
+    svc = ReportTemplateService()
+    result = svc.verify_delivery(delivery_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"交付记录 {delivery_id} 不存在")
+    return result
 
 
 # ── 链3: 分群对比异常链 ──
